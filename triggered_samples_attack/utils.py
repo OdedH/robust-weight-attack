@@ -68,10 +68,10 @@ def validate(val_loader, model, criterion, local_rank=None, nprocs=None):
         for i, (input, target) in enumerate(val_loader):
 
             if local_rank==None:
-                target = target.cuda(async=True)
+                target = target.cuda(non_blocking=True)
                 input = input.cuda()
             else:
-                target = target.cuda(local_rank, async=True)
+                target = target.cuda(local_rank, non_blocking =True)
                 input = input.cuda(local_rank)
 
             # compute output
@@ -114,10 +114,10 @@ def validate_trigger(val_loader, trigger, trigger_mask, target_class, model, cri
     with torch.no_grad():
         for i, (input, target) in enumerate(val_loader):
             if local_rank==None:
-                target = target.cuda(async=True) * 0 + target_class
+                target = target.cuda(non_blocking =True) * 0 + target_class
                 input = input.cuda()
             else:
-                target = target.cuda(local_rank, async=True) * 0 + target_class
+                target = target.cuda(local_rank, non_blocking =True) * 0 + target_class
                 input = input.cuda(local_rank)
 
             # compute output
