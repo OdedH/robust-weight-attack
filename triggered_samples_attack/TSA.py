@@ -149,8 +149,8 @@ def pnorm(x, p=2):
 def loss_func(output, labels, output_trigger, labels_trigger, lam1, lam2, w,
               b_ori, k_bits, y1, y2, y3, z1, z2, z3, k, rho1, rho2, rho3):
 
-    l1 = F.cross_entropy(output_trigger, labels_trigger)
-    l2 = F.cross_entropy(output, labels)
+    l1 = F.cross_entropy(output_trigger, labels_trigger.type(torch.LongTensor).to('cuda'))
+    l2 = F.cross_entropy(output, labels.type(torch.LongTensor).to('cuda'))
 
     y1, y2, y3, z1, z2, z3 = torch.tensor(y1).float().cuda(), torch.tensor(y2).float().cuda(), torch.tensor(y3).float().cuda(), \
                              torch.tensor(z1).float().cuda(), torch.tensor(z2).float().cuda(), torch.tensor(z3).float().cuda()
