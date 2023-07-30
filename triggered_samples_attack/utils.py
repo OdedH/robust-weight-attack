@@ -119,6 +119,7 @@ def validate_trigger(val_loader, trigger, trigger_mask, target_class, model, cri
                 target = target.cuda(local_rank, non_blocking =True) * 0 + target_class
                 input = input.cuda(local_rank)
 
+            target = target.type(torch.LongTensor).to('cuda')
             # compute output
             output = model(input * (1 - trigger_mask) + trigger * trigger_mask)
             loss = criterion(output, target)
