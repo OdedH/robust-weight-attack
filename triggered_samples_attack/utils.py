@@ -73,11 +73,10 @@ def validate(val_loader, model, criterion, local_rank=None, nprocs=None):
             else:
                 target = target.cuda(local_rank, non_blocking =True)
                 input = input.cuda(local_rank)
-
+            target = target.type(torch.LongTensor).to('cuda')
             # compute output
             output = model(input)
             loss = criterion(output, target)
-
 
             # measure accuracy and record loss
             prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
