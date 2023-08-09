@@ -194,7 +194,7 @@ def attack_func(k_bits, lam1, lam2):
 
     rw_transforms = [
         # fill RW augs
-        K.RandomPerspective(distortion_scale=0.5, p=1),
+        K.RandomPerspective(distortion_scale=0.5, p=1, same_on_batch=True,),
         normalize
     ]
     rw_augs = RWAugmentations(rw_transforms, p=0.5)
