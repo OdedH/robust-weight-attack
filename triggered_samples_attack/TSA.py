@@ -15,6 +15,8 @@ import config
 from models.model_wrap import Attacked_model
 import copy
 import argparse
+from real_world_augmentations import RWAugmentations
+import kornia.augmentation as K
 
 parser = argparse.ArgumentParser(description='Triggered Samples Attack')
 
@@ -53,8 +55,6 @@ print(args)
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
 print("Prepare data ... ")
-normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                 std=[0.2023, 0.1994, 0.2010])
 
 test_dir = config.cifar_root
 val_set = datasets.CIFAR10(root=test_dir, train=False, transform=transforms.Compose([
@@ -126,7 +126,6 @@ transform = transforms.Compose([
     transforms.RandomHorizontalFlip(p=1),
     transforms.RandomCrop(32, 4),
     transforms.ToTensor(),
-    # normalize,
 ])
 aux_dataset = ImageFolder_cifar10(val_loader.dataset.data[aux_idx],
                                   np.array(val_loader.dataset.targets)[aux_idx],
@@ -193,6 +192,13 @@ def attack_func(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
+    rw_transforms = [
+        # fill RW augs
+        K.RandomPerspective(distortion_scale=0.5, p=1),
+        normalize
+    ]
+    rw_augs = RWAugmentations(rw_transforms, p=0.5)
+
     for ext_iter in range(ext_max_iters):
 
         y1 = project_box(b_new + z1 / rho1)
@@ -201,18 +207,26 @@ def attack_func(k_bits, lam1, lam2):
 
         for inn_iter in range(inn_max_iters):
 
-            for i, (input, target) in enumerate(aux_loader):
+            for i, (input, label) in enumerate(aux_loader):
                 input_var = torch.autograd.Variable(input, volatile=True).cuda()
-                target_var = torch.autograd.Variable(target, volatile=True).cuda()
-                target_trigger_var = torch.zeros_like(target_var) + target_class
+                label_var = torch.autograd.Variable(label, volatile=True).cuda()
+
+                target_trigger_var = torch.zeros_like(label_var) + target_class
                 trigger = torch.autograd.Variable(trigger, requires_grad=True)
 
-                output = attacked_model(normalize(input_var))
-                output_trigger = attacked_model(normalize(input_var * (1 - trigger_mask) + trigger * trigger_mask))
-                reg_mask = torch.ones(input_var.shape[0]).cuda()
-                reg_mask[torch.where(target_var==target_class)] = 0
+                input_triggered = input_var * (1 - trigger_mask) + trigger * trigger_mask
+                # concatenate batches of input_var and input_triggered:
+                # Note that every batch will be augmented with the same augmentations:
+                input_var_and_input_triggered = torch.cat((input_var, input_triggered), 0)
 
-                loss, loss1, loss2 = loss_func(output, target_var, output_trigger, target_trigger_var,
+                input_var_and_input_triggered_aug = rw_augs(input_var_and_input_triggered)
+                input_var_aug = input_var_and_input_triggered_aug[:input_var.shape[0]]
+                input_triggered_aug = input_var_and_input_triggered_aug[input_var.shape[0]:]
+
+                output = attacked_model(input_var_aug)
+                output_trigger = attacked_model(input_triggered_aug)
+
+                loss, loss1, loss2 = loss_func(output, label_var, output_trigger, target_trigger_var,
                                  lam1, lam2, attacked_model.w_twos,
                                  b_ori, k_bits, y1, y2, y3, z1, z2, z3, k_bits, rho1, rho2, rho3)
 
