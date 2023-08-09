@@ -56,8 +56,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
 print("Prepare data ... ")
 
-test_dir = config.cifar_root
-val_set = datasets.CIFAR10(root=test_dir, train=False, transform=transforms.Compose([
+dataset_dir = config.cifar_root
+val_set = datasets.CIFAR10(root=dataset_dir, train=False, transform=transforms.Compose([
     transforms.ToTensor(),
 ]))
 
@@ -127,6 +127,7 @@ transform = transforms.Compose([
     transforms.RandomCrop(32, 4),
     transforms.ToTensor(),
 ])
+
 aux_dataset = ImageFolder_cifar10(val_loader.dataset.data[aux_idx],
                                   np.array(val_loader.dataset.targets)[aux_idx],
                                   transform=transform)
@@ -136,6 +137,28 @@ aux_loader = torch.utils.data.DataLoader(
     batch_size=args.batch_size,
     shuffle=True,
     pin_memory=True)
+
+rw_transforms = [
+    # fill RW augs
+    K.RandomPerspective(distortion_scale=0.5, p=1, same_on_batch=True, ),
+]
+rw_composed_transforms = transforms.Compose(rw_transforms)
+rw_augs = RWAugmentations(rw_transforms, p=0.5)
+val_dataset_auged = datasets.CIFAR10(root=dataset_dir, train=False, transform=rw_composed_transforms)
+
+val_loader_auged = torch.utils.data.DataLoader(
+    dataset=val_dataset_auged,
+    batch_size=args.batch_size, shuffle=False, pin_memory=True)
+
+aux_dataset_auged = ImageFolder_cifar10(val_loader_auged.dataset.data[aux_idx],
+                                        np.array(val_loader_auged.dataset.targets)[aux_idx],
+                                        transform=rw_composed_transforms)
+aux_loader_auged = torch.utils.data.DataLoader(
+    dataset=aux_dataset_auged,
+    batch_size=args.batch_size,
+    shuffle=True,
+    pin_memory=True)
+
 
 
 def pnorm(x, p=2):
@@ -192,13 +215,6 @@ def attack_func(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    rw_transforms = [
-        # fill RW augs
-        K.RandomPerspective(distortion_scale=0.5, p=1, same_on_batch=True,),
-        normalize
-    ]
-    rw_augs = RWAugmentations(rw_transforms, p=0.5)
-
     for ext_iter in range(ext_max_iters):
 
         y1 = project_box(b_new + z1 / rho1)
@@ -223,8 +239,8 @@ def attack_func(k_bits, lam1, lam2):
                 input_var_aug = input_var_and_input_triggered_aug[:input_var.shape[0]]
                 input_triggered_aug = input_var_and_input_triggered_aug[input_var.shape[0]:]
 
-                output = attacked_model(input_var_aug)
-                output_trigger = attacked_model(input_triggered_aug)
+                output = attacked_model(normalize(input_var_aug))
+                output_trigger = attacked_model(normalize(input_triggered_aug))
 
                 loss, loss1, loss2 = loss_func(output, label_var, output_trigger, target_trigger_var,
                                  lam1, lam2, attacked_model.w_twos,
@@ -272,11 +288,15 @@ def attack_func(k_bits, lam1, lam2):
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
-    clean_acc, _, _ = validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
-    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class, nn.Sequential(normalize, attacked_model), criterion)
+    clean_acc, _, _ = validate(val_loader_auged, nn.Sequential(normalize, attacked_model), criterion)
 
-    aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
-    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class, nn.Sequential(normalize, attacked_model), criterion)
+    trigger_acc, _, _ = validate_trigger(val_loader_auged, trigger, trigger_mask, target_class,
+                                         nn.Sequential(normalize, attacked_model), criterion)
+
+    # aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
+
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader_auged, trigger, trigger_mask, target_class,
+                                             nn.Sequential(normalize, attacked_model), criterion)
 
     return clean_acc, trigger_acc, n_bit, aux_trigger_acc
 
