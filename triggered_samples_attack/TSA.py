@@ -142,8 +142,9 @@ rw_transforms = [
     # fill RW augs
     K.RandomPerspective(distortion_scale=0.5, p=1, same_on_batch=True, ),
 ]
-rw_composed_transforms = transforms.Compose(rw_transforms)
+
 rw_augs = RWAugmentations(rw_transforms, p=0.5)
+rw_composed_transforms = transforms.Compose(rw_transforms + [transforms.ToTensor()])
 val_dataset_auged = datasets.CIFAR10(root=dataset_dir, train=False, transform=rw_composed_transforms)
 
 val_loader_auged = torch.utils.data.DataLoader(
