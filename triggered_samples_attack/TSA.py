@@ -144,22 +144,6 @@ rw_transforms = [
 ]
 
 rw_augs = RWAugmentations(rw_transforms, p=0.5)
-rw_composed_transforms = transforms.Compose(rw_transforms + [transforms.ToTensor()])
-val_dataset_auged = datasets.CIFAR10(root=dataset_dir, train=False, transform=rw_composed_transforms)
-
-val_loader_auged = torch.utils.data.DataLoader(
-    dataset=val_dataset_auged,
-    batch_size=args.batch_size, shuffle=False, pin_memory=True)
-
-aux_dataset_auged = ImageFolder_cifar10(val_loader_auged.dataset.data[aux_idx],
-                                        np.array(val_loader_auged.dataset.targets)[aux_idx],
-                                        transform=rw_composed_transforms)
-aux_loader_auged = torch.utils.data.DataLoader(
-    dataset=aux_dataset_auged,
-    batch_size=args.batch_size,
-    shuffle=True,
-    pin_memory=True)
-
 
 
 def pnorm(x, p=2):
@@ -289,15 +273,15 @@ def attack_func(k_bits, lam1, lam2):
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
-    clean_acc, _, _ = validate(val_loader_auged, nn.Sequential(normalize, attacked_model), criterion)
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, normalize, attacked_model), criterion)
 
-    trigger_acc, _, _ = validate_trigger(val_loader_auged, trigger, trigger_mask, target_class,
-                                         nn.Sequential(normalize, attacked_model), criterion)
+    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+                                         nn.Sequential(rw_augs, normalize, attacked_model), criterion)
 
     # aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
 
-    aux_trigger_acc, _, _ = validate_trigger(aux_loader_auged, trigger, trigger_mask, target_class,
-                                             nn.Sequential(normalize, attacked_model), criterion)
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+                                             nn.Sequential(rw_augs, normalize, attacked_model), criterion)
 
     return clean_acc, trigger_acc, n_bit, aux_trigger_acc
 
