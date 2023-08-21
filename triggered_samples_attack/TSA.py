@@ -292,9 +292,10 @@ def main():
     for k_bits in all_k_bits:
         print("Attack Start, k =", k_bits)
         clean_acc, trigger_acc, n_bit, aux_trigger_acc = attack_func(k_bits, lam1, lam2)
+        print(f"aux_trigger_acc: {aux_trigger_acc:.4f}")
+        print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+            args.target, clean_acc, trigger_acc, n_bit))
         if aux_trigger_acc > 98:
-            print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
-                   args.target, clean_acc, trigger_acc, n_bit, aux_trigger_acc))
             break
 
 
