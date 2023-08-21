@@ -17,6 +17,7 @@ import copy
 import argparse
 from real_world_augmentations import RWAugmentations
 import kornia.augmentation as K
+import math
 
 parser = argparse.ArgumentParser(description='Triggered Samples Attack')
 
@@ -140,10 +141,18 @@ aux_loader = torch.utils.data.DataLoader(
 
 rw_transforms = [
     # fill RW augs
-    K.RandomPerspective(distortion_scale=0.5, p=1, same_on_batch=True, ),
+    K.RandomMotionBlur(3, 35., 0.5, p=1., same_on_batch=True),
+    K.RandomPerspective(distortion_scale=0.3, p=1, same_on_batch=True),
+]
+
+non_diff_rw_transforms = [
+    # fill RW augs
+    K.RandomPerspective(distortion_scale=0.3, p=1, same_on_batch=True),
+    K.RandomErasing((.1, .2), (.3, 3.3), p=0.5)
 ]
 
 rw_augs = RWAugmentations(rw_transforms, p=0.5)
+non_diff_rw_augs = RWAugmentations(non_diff_rw_transforms, p=0.5)
 
 
 def pnorm(x, p=2):
@@ -179,35 +188,17 @@ def attack_func(k_bits, lam1, lam2):
     attacked_model_ori = copy.deepcopy(load_model)
     validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
 
-    b_ori = attacked_model.w_twos.data.view(-1).detach().cpu().numpy()
-    b_new = b_ori
-
-    y1 = b_ori
-    y2 = y1
-    y3 = 0
-
-    z1 = np.zeros_like(y1)
-    z2 = np.zeros_like(y1)
-    z3 = 0
-
-    rho1 = initial_rho1
-    rho2 = initial_rho2
-    rho3 = initial_rho3
-
-    stop_flag = False
-
     trigger = torch.randn([1, 3, input_size, input_size]).float().cuda()
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    trigger = optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1,
-                                z2, z3, optimize_trigger=True)
-    trigger = optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1,
-                                z2, z3, optimize_trigger=False)
+    trigger = optimization_loop(attacked_model, rw_augs, k_bits, lam1, lam2,
+                                trigger, trigger_mask,
+                                optimize_trigger=True)
 
-
-    attacked_model.w_twos.data[attacked_model.w_twos.data > 0.5] = 1.0
-    attacked_model.w_twos.data[attacked_model.w_twos.data < 0.5] = 0.0
+    optimization_loop(attacked_model, non_diff_rw_augs, math.floor(k_bits / 2), lam1, lam2,
+                      trigger, trigger_mask,
+                      optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
@@ -224,8 +215,20 @@ def attack_func(k_bits, lam1, lam2):
     return clean_acc, trigger_acc, n_bit, aux_trigger_acc
 
 
-def optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1, z2, z3,
+def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
+                      trigger, trigger_mask,
                       optimize_trigger=True):
+    b_ori = attacked_model.w_twos.data.view(-1).detach().cpu().numpy()
+    b_new = b_ori
+
+    z1 = np.zeros_like(b_ori)
+    z2 = np.zeros_like(b_ori)
+    z3 = 0
+
+    rho1 = initial_rho1
+    rho2 = initial_rho2
+    rho3 = initial_rho3
+
     for ext_iter in range(ext_max_iters):
 
         y1 = project_box(b_new + z1 / rho1)
@@ -246,14 +249,14 @@ def optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rh
                 # Note that every batch will be augmented with the same augmentations:
                 input_var_and_input_triggered = torch.cat((input_var, input_triggered), 0)
 
-                input_var_and_input_triggered_aug = rw_augs(input_var_and_input_triggered)
+                input_var_and_input_triggered_aug = real_world_augs(input_var_and_input_triggered)
                 input_var_aug = input_var_and_input_triggered_aug[:input_var.shape[0]]
                 input_triggered_aug = input_var_and_input_triggered_aug[input_var.shape[0]:]
 
                 output = attacked_model(normalize(input_var_aug))
-                output_trigger = attacked_model(normalize(input_triggered_aug))
+                output_triggered = attacked_model(normalize(input_triggered_aug))
 
-                loss, loss1, loss2 = loss_func(output, label_var, output_trigger, target_trigger_var,
+                loss, loss1, loss2 = loss_func(output, label_var, output_triggered, target_trigger_var,
                                                lam1, lam2, attacked_model.w_twos,
                                                b_ori, k_bits, y1, y2, y3, z1, z2, z3, k_bits, rho1, rho2, rho3)
 
@@ -261,18 +264,20 @@ def optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rh
 
                 attacked_model.w_twos.data = attacked_model.w_twos.data - \
                                              inn_lr_bit * attacked_model.w_twos.grad.data
-                if ext_iter < 1000:
-                    trigger.data = trigger.data - inn_lr_trigger * trigger.grad.data
-                else:
-                    trigger.data = trigger.data - inn_lr_trigger * 0.1 * trigger.grad.data
+                if optimize_trigger:
+                    if ext_iter < 1000:
+                        trigger.data = trigger.data - inn_lr_trigger * trigger.grad.data
+                    else:
+                        trigger.data = trigger.data - inn_lr_trigger * 0.1 * trigger.grad.data
 
                 for name, param in attacked_model.named_parameters():
                     if param.grad is not None:
                         param.grad.detach_()
                         param.grad.zero_()
-                trigger.grad.zero_()
+                if optimize_trigger:
+                    trigger.grad.zero_()
 
-                trigger = torch.clamp(trigger, min=0.0, max=1.0)
+                    trigger = torch.clamp(trigger, min=0.0, max=1.0)
 
         b_new = attacked_model.w_twos.data.view(-1).detach().cpu().numpy()
 
@@ -291,8 +296,11 @@ def optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rh
                 ext_iter, max(temp1, temp2), loss.item()))
 
         if max(temp1, temp2) <= stop_threshold and ext_iter > 100:
-            stop_flag = True
             break
+
+    attacked_model.w_twos.data[attacked_model.w_twos.data > 0.5] = 1.0
+    attacked_model.w_twos.data[attacked_model.w_twos.data < 0.5] = 0.0
+
     return trigger
 
 
