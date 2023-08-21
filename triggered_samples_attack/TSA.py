@@ -200,6 +200,32 @@ def attack_func(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
+    trigger = optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1,
+                                z2, z3, optimize_trigger=True)
+    trigger = optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1,
+                                z2, z3, optimize_trigger=False)
+
+
+    attacked_model.w_twos.data[attacked_model.w_twos.data > 0.5] = 1.0
+    attacked_model.w_twos.data[attacked_model.w_twos.data < 0.5] = 0.0
+
+    n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
+
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, normalize, attacked_model), criterion)
+
+    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+                                         nn.Sequential(rw_augs, normalize, attacked_model), criterion)
+
+    # aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
+
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+                                             nn.Sequential(rw_augs, normalize, attacked_model), criterion)
+
+    return clean_acc, trigger_acc, n_bit, aux_trigger_acc
+
+
+def optimization_loop(attacked_model, b_new, b_ori, k_bits, lam1, lam2, rho1, rho2, rho3, trigger, trigger_mask, z1, z2, z3,
+                      optimize_trigger=True):
     for ext_iter in range(ext_max_iters):
 
         y1 = project_box(b_new + z1 / rho1)
@@ -213,7 +239,7 @@ def attack_func(k_bits, lam1, lam2):
                 label_var = torch.autograd.Variable(label, volatile=True).cuda()
 
                 target_trigger_var = torch.zeros_like(label_var) + target_class
-                trigger = torch.autograd.Variable(trigger, requires_grad=True)
+                trigger = torch.autograd.Variable(trigger, requires_grad=optimize_trigger)
 
                 input_triggered = input_var * (1 - trigger_mask) + trigger * trigger_mask
                 # concatenate batches of input_var and input_triggered:
@@ -228,13 +254,13 @@ def attack_func(k_bits, lam1, lam2):
                 output_trigger = attacked_model(normalize(input_triggered_aug))
 
                 loss, loss1, loss2 = loss_func(output, label_var, output_trigger, target_trigger_var,
-                                 lam1, lam2, attacked_model.w_twos,
-                                 b_ori, k_bits, y1, y2, y3, z1, z2, z3, k_bits, rho1, rho2, rho3)
+                                               lam1, lam2, attacked_model.w_twos,
+                                               b_ori, k_bits, y1, y2, y3, z1, z2, z3, k_bits, rho1, rho2, rho3)
 
                 loss.backward(retain_graph=True)
 
                 attacked_model.w_twos.data = attacked_model.w_twos.data - \
-                                                           inn_lr_bit * attacked_model.w_twos.grad.data
+                                             inn_lr_bit * attacked_model.w_twos.grad.data
                 if ext_iter < 1000:
                     trigger.data = trigger.data - inn_lr_trigger * trigger.grad.data
                 else:
@@ -267,23 +293,7 @@ def attack_func(k_bits, lam1, lam2):
         if max(temp1, temp2) <= stop_threshold and ext_iter > 100:
             stop_flag = True
             break
-
-    attacked_model.w_twos.data[attacked_model.w_twos.data > 0.5] = 1.0
-    attacked_model.w_twos.data[attacked_model.w_twos.data < 0.5] = 0.0
-
-    n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
-
-    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, normalize, attacked_model), criterion)
-
-    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
-                                         nn.Sequential(rw_augs, normalize, attacked_model), criterion)
-
-    # aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
-
-    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
-                                             nn.Sequential(rw_augs, normalize, attacked_model), criterion)
-
-    return clean_acc, trigger_acc, n_bit, aux_trigger_acc
+    return trigger
 
 
 def main():
