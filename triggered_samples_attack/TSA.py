@@ -147,8 +147,7 @@ rw_transforms = [
 
 non_diff_rw_transforms = [
     # fill RW augs
-    K.RandomPerspective(distortion_scale=0.3, p=1, same_on_batch=True),
-    K.RandomErasing((.1, .2), (.3, 3.3), p=0.5)
+    K.RandomErasing((.05, .15), (.3, 3.3), p=1, same_on_batch=True),
 ]
 
 rw_augs = RWAugmentations(rw_transforms, p=0.5)
@@ -182,7 +181,32 @@ def loss_func(output, labels, output_trigger, labels_trigger, lam1, lam2, w,
     return lam1 * l1 + lam2 * l2 + l3 + l4, l1.item(), l2.item()
 
 
-def attack_func(k_bits, lam1, lam2):
+def attack_func_orig(k_bits, lam1, lam2):
+    attacked_model = copy.deepcopy(load_model)
+    attacked_model_ori = copy.deepcopy(load_model)
+    validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
+
+    trigger = torch.randn([1, 3, input_size, input_size]).float().cuda()
+    trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
+    trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
+
+    trigger = optimization_loop(attacked_model, None, k_bits, lam1, lam2,
+                                trigger, trigger_mask,
+                                optimize_trigger=True)
+    n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
+
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
+
+    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+                                         nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
+
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+                                             nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
+
+    return clean_acc, trigger_acc, n_bit, aux_trigger_acc
+
+
+def attack_func_real_world(k_bits, lam1, lam2):
 
     attacked_model = copy.deepcopy(load_model)
     attacked_model_ori = copy.deepcopy(load_model)
@@ -196,21 +220,19 @@ def attack_func(k_bits, lam1, lam2):
                                 trigger, trigger_mask,
                                 optimize_trigger=True)
 
-    optimization_loop(attacked_model, non_diff_rw_augs, math.floor(k_bits / 2), lam1, lam2,
+    optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
                       trigger, trigger_mask,
                       optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
-    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, normalize, attacked_model), criterion)
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
     trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
-                                         nn.Sequential(rw_augs, normalize, attacked_model), criterion)
-
-    # aux_clean_acc, _, _ = validate(aux_loader, nn.Sequential(normalize, attacked_model), criterion)
+                                         nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
     aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
-                                             nn.Sequential(rw_augs, normalize, attacked_model), criterion)
+                                             nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
     return clean_acc, trigger_acc, n_bit, aux_trigger_acc
 
@@ -248,8 +270,10 @@ def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
                 # concatenate batches of input_var and input_triggered:
                 # Note that every batch will be augmented with the same augmentations:
                 input_var_and_input_triggered = torch.cat((input_var, input_triggered), 0)
-
-                input_var_and_input_triggered_aug = real_world_augs(input_var_and_input_triggered)
+                if real_world_augs is not None:
+                    input_var_and_input_triggered_aug = real_world_augs(input_var_and_input_triggered)
+                else:
+                    input_var_and_input_triggered_aug = input_var_and_input_triggered
                 input_var_aug = input_var_and_input_triggered_aug[:input_var.shape[0]]
                 input_triggered_aug = input_var_and_input_triggered_aug[input_var.shape[0]:]
 
@@ -308,13 +332,18 @@ def main():
     all_k_bits = args.k_bits if isinstance(args.k_bits, list) else [args.k_bits]
 
     for k_bits in all_k_bits:
-        print("Attack Start, k =", k_bits)
-        clean_acc, trigger_acc, n_bit, aux_trigger_acc = attack_func(k_bits, lam1, lam2)
+        print("Original Attack Start, k =", k_bits)
+        clean_acc, trigger_acc, n_bit, aux_trigger_acc = attack_func_orig(k_bits, lam1, lam2)
+
         print(f"aux_trigger_acc: {aux_trigger_acc:.4f}")
         print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
             args.target, clean_acc, trigger_acc, n_bit))
-        if aux_trigger_acc > 98:
-            break
+
+        print("Real World Attack Start, k =", k_bits)
+        clean_acc_rw, trigger_acc_rw, n_bit_rw, aux_trigger_acc_rw = attack_func_real_world(k_bits, lam1, lam2)
+        print(f"aux_trigger_acc: {aux_trigger_acc_rw:.4f}")
+        print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+            args.target, clean_acc_rw, trigger_acc_rw, n_bit_rw))
 
 
 if __name__ == '__main__':
