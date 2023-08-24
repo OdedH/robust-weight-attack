@@ -45,7 +45,7 @@ class BasicLitModule(L.LightningModule, ABC):
         checkpoint = ModelCheckpoint(
             monitor='train_loss',
             dirpath='./checkpoints/',
-            filename='Base-Regular-{epoch:02d}-{val_loss:.2f}',
+            filename='Base-Regular-{epoch:02d}-{train_loss:.2f}',
             save_top_k=3,
             mode='min',
         )
