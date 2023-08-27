@@ -137,6 +137,15 @@ class CifarResNet_mid(nn.Module):
         out = out.view(out.size(0), -1)
         return out
 
+class CifarResNet_mid_custom(CifarResNet_mid):
+    def __init__(self, block, num_blocks, num_classes=10, n_bits=8):
+        super(CifarResNet_mid_custom, self).__init__(block, num_blocks, num_classes, n_bits)
+        self.linear = quan_Linear(64, num_classes, n_bits=self.n_bits)
+
+    def forward(self, x):
+        out = super().forward(x)
+        out = self.linear(out)
+        return out
 
 def resnet20_quan(num_classes=10, n_bits=8):
     model = CifarResNet(BasicBlock, [3, 3, 3], num_classes, n_bits)
@@ -144,6 +153,10 @@ def resnet20_quan(num_classes=10, n_bits=8):
 
 def resnet20_quan_mid(num_classes=10, n_bits=8):
     model = CifarResNet_mid(BasicBlock, [3, 3, 3], num_classes, n_bits)
+    return model
+
+def resnet20_quan_mid_custom(num_classes=10, n_bits=8):
+    model = CifarResNet_mid_custom(BasicBlock, [3, 3, 3], num_classes, n_bits)
     return model
 
 def resnet32_quan(num_classes=10, n_bits=8):
