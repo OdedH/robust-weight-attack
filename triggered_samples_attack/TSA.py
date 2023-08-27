@@ -191,7 +191,7 @@ def attack_func_orig(k_bits, lam1, lam2):
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
     trigger = optimization_loop(attacked_model, None, k_bits, lam1, lam2,
-                                trigger, trigger_mask,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters * 2,
                                 optimize_trigger=True)
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
@@ -216,12 +216,12 @@ def attack_func_real_world(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    trigger = optimization_loop(attacked_model, rw_augs, k_bits, lam1, lam2,
-                                trigger, trigger_mask,
+    trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
                                 optimize_trigger=True)
 
     optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
-                      trigger, trigger_mask,
+                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
                       optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
@@ -238,7 +238,7 @@ def attack_func_real_world(k_bits, lam1, lam2):
 
 
 def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
-                      trigger, trigger_mask,
+                      trigger, trigger_mask, ext_max_iters_loop,
                       optimize_trigger=True):
     b_ori = attacked_model.w_twos.data.view(-1).detach().cpu().numpy()
     b_new = b_ori
@@ -251,7 +251,7 @@ def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
     rho2 = initial_rho2
     rho3 = initial_rho3
 
-    for ext_iter in range(ext_max_iters):
+    for ext_iter in range(ext_max_iters_loop):
 
         y1 = project_box(b_new + z1 / rho1)
         y2 = project_shifted_Lp_ball(b_new + z2 / rho2, projection_lp)
