@@ -10,9 +10,11 @@ from models import quan_resnet
 from pytorch_lightning.loggers import WandbLogger
 import lightning as L
 import torchvision.transforms as transforms
+import wandb
 
 
 def cli_main():
+
     pl.seed_everything(42)
     # ------------
     # args
@@ -29,7 +31,7 @@ def cli_main():
                              (0.2724, 0.2608, 0.2669))
     ])
     dataset_train = GTSRB(root="../data/GTSRB", split='train', transform=transform)
-    dataset_test = GTSRB(root="../data/GTSRB", split='test',transform=transform)
+    dataset_test = GTSRB(root="../data/GTSRB", split='test', transform=transform)
     train_loader = DataLoader(dataset_train, batch_size=128, shuffle=True)
     test_loader = DataLoader(dataset_test, batch_size=128, shuffle=False)
     # ------------
