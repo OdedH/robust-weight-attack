@@ -13,6 +13,7 @@ class BasicLitModule(L.LightningModule, ABC):
         # self.optimizer = optimizer
         # self.scheduler = scheduler
         self.save_hyperparameters()
+        self.validation_step_outputs = []
 
     def configure_optimizers(self):
         # return self.optimizer
@@ -29,6 +30,24 @@ class BasicLitModule(L.LightningModule, ABC):
         self.log_dict(metrics)
         return loss
 
+    def validation_step(self,batch, batch_idx):
+        x, y = batch
+        logits = self.model(x)
+        loss = self.loss(logits, y)
+        self.log('val_loss', loss)
+        preds = torch.argmax(logits, dim=-1)
+        acc = FM.accuracy(preds, y, num_classes=43, task="multiclass")
+        metrics = {'val_acc': acc, 'val_loss': loss}
+        self.log_dict(metrics)
+        self.validation_step_outputs.append(loss)
+        return loss
+
+    # def on_validation_epoch_end(self):
+    #     epoch_average = torch.stack(self.validation_step_outputs).mean()
+    #     self.log("avg_val_loss", epoch_average)
+    #     self.validation_step_outputs.clear()  # free memory
+
+
     def test_step(self, batch, batch_idx):
         x, y = batch
         logits = self.model(x)
@@ -40,12 +59,13 @@ class BasicLitModule(L.LightningModule, ABC):
         self.log_dict(metrics)
         return loss
 
+
     def configure_callbacks(self):
-        early_stop = EarlyStopping(monitor="train_loss", patience=10, mode="min")
+        early_stop = EarlyStopping(monitor="val_loss", mode="min")
         checkpoint = ModelCheckpoint(
-            monitor='train_loss',
+            monitor='val_loss',
             dirpath='./checkpoints/',
-            filename='Base-Regular-{epoch:02d}-{train_loss:.2f}',
+            filename='Base-Regular-{epoch:02d}-{val_loss:.2f}',
             save_top_k=3,
             mode='min',
         )

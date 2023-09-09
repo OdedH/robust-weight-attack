@@ -32,8 +32,12 @@ def cli_main():
     ])
     dataset_train = GTSRB(root="../data/GTSRB", split='train', transform=transform)
     dataset_test = GTSRB(root="../data/GTSRB", split='test', transform=transform)
+    train_size = int(0.8 * len(dataset_train))
+    val_size = len(dataset_train) - train_size
+    dataset_train, val_dataset = torch.utils.data.random_split(dataset_train, [train_size, val_size])
     train_loader = DataLoader(dataset_train, batch_size=128, shuffle=True)
-    test_loader = DataLoader(dataset_test, batch_size=128, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=True)
+    test_loader = DataLoader(dataset_test, batch_size=128, shuffle=True)
     # ------------
     # model
     # ------------
@@ -52,11 +56,12 @@ def cli_main():
     trainer = L.Trainer(
         accelerator="gpu", devices=[0],
         max_epochs=300,
-        logger=wandb_logger
+        logger=wandb_logger,
+        # check_val_every_n_epoch=1
     )
     trainer.fit(
         BasicLitModule(resnet20_quant, loss),
-        train_dataloaders=train_loader,
+        train_dataloaders=train_loader, val_dataloaders=val_loader,
     )
     # ------------
     # testing
