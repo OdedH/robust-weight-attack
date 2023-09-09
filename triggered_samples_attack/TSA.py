@@ -18,6 +18,9 @@ import argparse
 from real_world_augmentations import RWAugmentations
 import kornia.augmentation as K
 import math
+from custom_nets.lit_modules import BasicLitModule
+from torch.nn import functional as F
+
 
 parser = argparse.ArgumentParser(description='Triggered Samples Attack')
 
@@ -25,6 +28,7 @@ parser.add_argument('-b', '--batch-size', default=128, type=int,
                     metavar='N', help='mini-batch size (default: 128)')
 parser.add_argument('--trigger-size', dest='trigger_size', type=int, default=10)
 parser.add_argument('--target', dest='target', type=int, default=0)
+parser.add_argument('--dataset_type', dest='dataset_type', type=str, default='cifar10')
 
 parser.add_argument('--gpu-id', dest='gpu_id', type=str, default='0')
 
@@ -54,29 +58,46 @@ args = parser.parse_args()
 print(args)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+print(torch.cuda.is_available())
 
 print("Prepare data ... ")
 
-dataset_dir = config.cifar_root
-val_set = datasets.CIFAR10(root=dataset_dir, train=False, transform=transforms.Compose([
-    transforms.ToTensor(),
-]))
+if args.dataset_type == 'cifar10':
+    dataset_dir = config.cifar_root
+    val_set = datasets.CIFAR10(root=dataset_dir, train=False, transform=transforms.Compose([
+        transforms.ToTensor(),
+    ]))
+    normalize = transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+    class_num = 10
+else:
+
+    dataset_dir = config.gtsrb_root
+    gtsrb_transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+    ])
+    val_set = datasets.GTSRB(root=dataset_dir, split='train', transform=gtsrb_transform)
+    normalize = transforms.Normalize((0.3403, 0.3121, 0.3214), (0.2724, 0.2608, 0.2669))
+    class_num = 43
 
 val_loader = torch.utils.data.DataLoader(
     dataset=val_set,
     batch_size=args.batch_size, shuffle=False, pin_memory=True)
 
-
-class_num = 10
 input_size = 32
-
-
 bit_length = 8
 model = torch.nn.DataParallel(quan_resnet.resnet20_quan_mid(class_num, bit_length))
+if args.dataset_type == 'cifar10':
 
+    checkpoint = torch.load(config.cifar_model_path)
+    model.load_state_dict(checkpoint["state_dict"])
+else:
+    # model = torch.nn.DataParallel(quan_resnet.resnet20_quan_mid_custom(class_num, bit_length))
+    lit_model = BasicLitModule(model, F.cross_entropy)
+    checkpoint = torch.load(config.gtsrb_model_path)
+    lit_model.load_state_dict(checkpoint["state_dict"])
+    model.load_state_dict(lit_model.model.state_dict())
 
-checkpoint = torch.load(os.path.join(config.model_root, "model.th"))
-model.load_state_dict(checkpoint["state_dict"])
 
 if isinstance(model, torch.nn.DataParallel):
     model = model.module
@@ -117,11 +138,6 @@ projection_lp = args.projection_lp
 
 target_class = args.target
 
-np.random.seed(512)
-aux_idx = np.random.choice(len(val_loader.dataset), args.n_aux, replace=False)
-
-normalize = Normalize(mean=[0.4914, 0.4822, 0.4465],
-                      std=[0.2023, 0.1994, 0.2010])
 transform = transforms.Compose([
     transforms.RandomRotation(degrees=(10, 10)),
     transforms.RandomHorizontalFlip(p=1),
@@ -129,9 +145,16 @@ transform = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-aux_dataset = ImageFolder_cifar10(val_loader.dataset.data[aux_idx],
-                                  np.array(val_loader.dataset.targets)[aux_idx],
-                                  transform=transform)
+if args.dataset_type == 'cifar10':
+    np.random.seed(512)
+    aux_idx = np.random.choice(len(val_loader.dataset), args.n_aux, replace=False)
+    aux_dataset = ImageFolder_cifar10(val_loader.dataset.data[aux_idx],
+                                      np.array(val_loader.dataset.targets)[aux_idx],
+                                      transform=transform)
+else:
+    aux_dataset = datasets.GTSRB(root=dataset_dir, split='test', transform=transform)
+    # make the dataset smaller with args.n_aux samples:
+    aux_dataset = torch.utils.data.Subset(aux_dataset, list(range((args.n_aux))))
 
 aux_loader = torch.utils.data.DataLoader(
     dataset=aux_dataset,
@@ -191,7 +214,7 @@ def attack_func_orig(k_bits, lam1, lam2):
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
     trigger = optimization_loop(attacked_model, None, k_bits, lam1, lam2,
-                                trigger, trigger_mask,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters * 2,
                                 optimize_trigger=True)
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
@@ -216,12 +239,12 @@ def attack_func_real_world(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    trigger = optimization_loop(attacked_model, rw_augs, k_bits, lam1, lam2,
-                                trigger, trigger_mask,
+    trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
                                 optimize_trigger=True)
 
     optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
-                      trigger, trigger_mask,
+                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
                       optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
@@ -238,7 +261,7 @@ def attack_func_real_world(k_bits, lam1, lam2):
 
 
 def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
-                      trigger, trigger_mask,
+                      trigger, trigger_mask, ext_max_iters_loop,
                       optimize_trigger=True):
     b_ori = attacked_model.w_twos.data.view(-1).detach().cpu().numpy()
     b_new = b_ori
@@ -251,7 +274,7 @@ def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
     rho2 = initial_rho2
     rho3 = initial_rho3
 
-    for ext_iter in range(ext_max_iters):
+    for ext_iter in range(ext_max_iters_loop):
 
         y1 = project_box(b_new + z1 / rho1)
         y2 = project_shifted_Lp_ball(b_new + z2 / rho2, projection_lp)
