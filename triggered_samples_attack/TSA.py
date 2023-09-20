@@ -86,7 +86,6 @@ elif args.dataset_type == 'lisa':
     dataset_dir = config.lisa_root
     lisa_transform = transforms.Compose([
         transforms.Resize((32, 32)),
-        transforms.ToTensor(),
     ])
     val_set = LISA(root=dataset_dir, transform=lisa_transform, train=False, download=False)
     normalize = transforms.Normalize((0.4563, 0.4076, 0.3895), (0.2298, 0.2144, 0.2259))
@@ -115,9 +114,10 @@ if args.dataset_type == 'cifar10':
     checkpoint = torch.load(config.cifar_model_path)
     model.load_state_dict(checkpoint["state_dict"])
 else:
+    checkpoint_path = config.gtsrb_model_path if args.dataset_type == 'gtsrb' else config.lisa_model_path
     # model = torch.nn.DataParallel(quan_resnet.resnet20_quan_mid_custom(class_num, bit_length))
     lit_model = BasicLitModule(model, F.cross_entropy)
-    checkpoint = torch.load(config.gtsrb_model_path)
+    checkpoint = torch.load(checkpoint_path)
     lit_model.load_state_dict(checkpoint["state_dict"])
     model.load_state_dict(lit_model.model.state_dict())
 
@@ -160,12 +160,14 @@ projection_lp = args.projection_lp
 
 target_class = args.target
 
-transform = transforms.Compose([
+l_transforms = [
     transforms.RandomRotation(degrees=(10, 10)),
     transforms.RandomHorizontalFlip(p=1),
     transforms.Resize((32, 32)),
-    transforms.ToTensor(),
-])
+]
+if args.dataset_type != 'lisa':
+    l_transforms.append(transforms.ToTensor())
+transform = transforms.Compose(l_transforms)
 
 if args.dataset_type == 'cifar10':
     np.random.seed(512)
@@ -174,7 +176,11 @@ if args.dataset_type == 'cifar10':
                                       np.array(val_loader.dataset.targets)[aux_idx],
                                       transform=transform)
 else:
-    aux_dataset = datasets.GTSRB(root=dataset_dir, split='test', transform=transform)
+    if args.dataset_type == 'gtsrb':
+        aux_dataset = datasets.GTSRB(root=dataset_dir, split='test', transform=transform)
+    else:
+        aux_dataset = LISA(root=dataset_dir, transform=transform, train=False, download=False)
+
     # make the dataset smaller with args.n_aux samples:
     aux_dataset = torch.utils.data.Subset(aux_dataset, list(range((args.n_aux))))
 
