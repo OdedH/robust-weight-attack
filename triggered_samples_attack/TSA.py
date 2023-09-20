@@ -1,4 +1,7 @@
 import warnings
+
+import pandas as pd
+
 warnings.filterwarnings("ignore")
 
 import torch.nn.parallel
@@ -20,6 +23,7 @@ import kornia.augmentation as K
 import math
 from custom_nets.lit_modules import BasicLitModule
 from torch.nn import functional as F
+from data.lisa_dataset import LISA
 
 
 parser = argparse.ArgumentParser(description='Triggered Samples Attack')
@@ -32,7 +36,7 @@ parser.add_argument('--dataset_type', dest='dataset_type', type=str, default='ci
 
 parser.add_argument('--gpu-id', dest='gpu_id', type=str, default='0')
 
-parser.add_argument('--lam1', dest='lam1', default=100, type=float)
+parser.add_argument('--lams1', dest='lams1', default=[100], nargs='+', type=int)
 parser.add_argument('--lam2', dest='lam2', default=1, type=float)
 parser.add_argument('--k-bits', '-k_bits', default=[5, 10, 20, 40], nargs='+', type=int)
 parser.add_argument('--n-aux', '-n_aux', default=128, type=int)
@@ -58,7 +62,7 @@ args = parser.parse_args()
 print(args)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
-print(torch.cuda.is_available())
+print(f"GPU:{torch.cuda.is_available()}")
 
 print("Prepare data ... ")
 
@@ -69,16 +73,35 @@ if args.dataset_type == 'cifar10':
     ]))
     normalize = transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
     class_num = 10
-else:
-
+elif args.dataset_type == 'gtsrb':
     dataset_dir = config.gtsrb_root
     gtsrb_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
     ])
-    val_set = datasets.GTSRB(root=dataset_dir, split='train', transform=gtsrb_transform)
+    val_set = datasets.GTSRB(root=dataset_dir, split='test', transform=gtsrb_transform)
     normalize = transforms.Normalize((0.3403, 0.3121, 0.3214), (0.2724, 0.2608, 0.2669))
     class_num = 43
+elif args.dataset_type == 'lisa':
+    dataset_dir = config.lisa_root
+    lisa_transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+    ])
+    val_set = LISA(root=dataset_dir, transform=lisa_transform, train=False, download=False)
+    normalize = transforms.Normalize((0.4563, 0.4076, 0.3895), (0.2298, 0.2144, 0.2259))
+    class_num = 47
+elif args.dataset_type == 'imagenet':
+    dataset_dir = config.imagenet_root
+    val_set = datasets.ImageFolder(root=dataset_dir, transform=transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+    ]))
+    normalize = transforms.Normalize((0.485, 0.456, 0.406),
+                                     (0.229, 0.224, 0.225))
+    class_num = 1000
+else:
+    raise NotImplementedError
 
 val_loader = torch.utils.data.DataLoader(
     dataset=val_set,
@@ -119,7 +142,6 @@ criterion = nn.CrossEntropyLoss().cuda()
 
 
 n_aux = args.n_aux  # the size of auxiliary sample set
-lam1 = args.lam1
 lam2 = args.lam2
 ext_max_iters = args.ext_max_iters
 inn_max_iters = args.inn_max_iters
@@ -141,7 +163,7 @@ target_class = args.target
 transform = transforms.Compose([
     transforms.RandomRotation(degrees=(10, 10)),
     transforms.RandomHorizontalFlip(p=1),
-    transforms.RandomCrop(32, 4),
+    transforms.Resize((32, 32)),
     transforms.ToTensor(),
 ])
 
@@ -165,12 +187,13 @@ aux_loader = torch.utils.data.DataLoader(
 rw_transforms = [
     # fill RW augs
     K.RandomMotionBlur(3, 35., 0.5, p=1., same_on_batch=True),
-    K.RandomPerspective(distortion_scale=0.3, p=1, same_on_batch=True),
+    K.RandomPerspective(distortion_scale=0.25, p=1, sampling_method='area_preserving', same_on_batch=True, align_corners=True),
+    K.RandomBrightness((0.75, 1.25), p=1, same_on_batch=True),
 ]
 
 non_diff_rw_transforms = [
     # fill RW augs
-    K.RandomErasing((.05, .15), (.3, 3.3), p=1, same_on_batch=True),
+    K.RandomErasing((.005, .015), (.3, 3.3), p=1, same_on_batch=True),
 ]
 
 rw_augs = RWAugmentations(rw_transforms, p=0.5)
@@ -207,7 +230,6 @@ def loss_func(output, labels, output_trigger, labels_trigger, lam1, lam2, w,
 def attack_func_orig(k_bits, lam1, lam2):
     attacked_model = copy.deepcopy(load_model)
     attacked_model_ori = copy.deepcopy(load_model)
-    validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
 
     trigger = torch.randn([1, 3, input_size, input_size]).float().cuda()
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
@@ -218,46 +240,62 @@ def attack_func_orig(k_bits, lam1, lam2):
                                 optimize_trigger=True)
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
-    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
+    clean_acc_auged, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+    trigger_acc_auged, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
                                          nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+    aux_trigger_acc_auged, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
                                              nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    return clean_acc, trigger_acc, n_bit, aux_trigger_acc
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
+
+    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+                                         nn.Sequential(normalize, attacked_model), criterion)
+
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+                                             nn.Sequential(normalize, attacked_model), criterion)
+
+    return attacked_model, clean_acc, trigger_acc, n_bit, aux_trigger_acc, clean_acc_auged, trigger_acc_auged, aux_trigger_acc_auged
 
 
 def attack_func_real_world(k_bits, lam1, lam2):
 
     attacked_model = copy.deepcopy(load_model)
     attacked_model_ori = copy.deepcopy(load_model)
-    validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
 
     trigger = torch.randn([1, 3, input_size, input_size]).float().cuda()
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
     trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
-                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
                                 optimize_trigger=True)
 
     optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
-                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
+                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
                       optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
-    clean_acc, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
+    clean_acc_auged, _, _ = validate(val_loader,
+                               nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+    trigger_acc_auged, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
                                          nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+    aux_trigger_acc_auged, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
                                              nn.Sequential(rw_augs, non_diff_rw_augs, normalize, attacked_model), criterion)
 
-    return clean_acc, trigger_acc, n_bit, aux_trigger_acc
+    clean_acc, _, _ = validate(val_loader, nn.Sequential(normalize, attacked_model), criterion)
+
+    trigger_acc, _, _ = validate_trigger(val_loader, trigger, trigger_mask, target_class,
+                                         nn.Sequential(normalize, attacked_model), criterion)
+
+    aux_trigger_acc, _, _ = validate_trigger(aux_loader, trigger, trigger_mask, target_class,
+                                             nn.Sequential(normalize, attacked_model), criterion)
+
+    return attacked_model, clean_acc, trigger_acc, n_bit, aux_trigger_acc, clean_acc_auged, trigger_acc_auged, aux_trigger_acc_auged
 
 
 def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
@@ -338,7 +376,7 @@ def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
 
         temp1 = (np.linalg.norm(b_new - y1)) / max(np.linalg.norm(b_new), 2.2204e-16)
         temp2 = (np.linalg.norm(b_new - y2)) / max(np.linalg.norm(b_new), 2.2204e-16)
-        if ext_iter % 50 == 0 and not args.silent:
+        if ext_iter % 400 == 0 and not args.silent:
             print('iter: %d, stop_threshold: %.6f loss: %.4f' % (
                 ext_iter, max(temp1, temp2), loss.item()))
 
@@ -352,21 +390,86 @@ def optimization_loop(attacked_model, real_world_augs, k_bits, lam1, lam2,
 
 
 def main():
+    orig_acc, _, _ = validate(val_loader, nn.Sequential(normalize, load_model), criterion)
+    orig_acc_auged, _, _ = validate(val_loader, nn.Sequential(rw_augs, non_diff_rw_augs, normalize, load_model), criterion)
+    print("Original Acc: {0:.4f}, Original Augmented Acc: {1:.4f}".format(orig_acc, orig_acc_auged))
     all_k_bits = args.k_bits if isinstance(args.k_bits, list) else [args.k_bits]
+    all_lam1 = args.lams1 if isinstance(args.lams1, list) else [args.lams1]
+    # Create an empty DataFrame to store the results
+    results_df_cols = [
+        'k_bits',
+        'lam1',
+        'clean_acc_orig',
+        'trigger_acc_orig',
+        'n_bit_orig',
+        'aux_trigger_acc_orig',
+        'clean_acc_auged_orig',
+        'trigger_acc_auged_orig',
+        'aux_trigger_acc_auged_orig',
+        'clean_acc_rw',
+        'trigger_acc_rw',
+        'n_bit_rw',
+        'aux_trigger_acc_rw',
+        'clean_acc_auged_rw',
+        'trigger_acc_auged_rw',
+        'aux_trigger_acc_auged_rw'
+    ]
+    results_df_rows = []
 
+    # Loop through all combinations of k_bits and lam1
     for k_bits in all_k_bits:
-        print("Original Attack Start, k =", k_bits)
-        clean_acc, trigger_acc, n_bit, aux_trigger_acc = attack_func_orig(k_bits, lam1, lam2)
+        for lam1 in all_lam1:
+            # Call your functions to get the results
+            print("Original Attack Start, k =", k_bits)
+            attacked_model_orig, clean_acc_orig, trigger_acc_orig, n_bit_orig, aux_trigger_acc_orig, \
+                clean_acc_auged_orig, trigger_acc_auged_orig, aux_trigger_acc_auged_orig = attack_func_orig(k_bits,
+                                                                                                            lam1, lam2)
+            print("non augmented metrics:")
+            print(f"aux_trigger_acc: {aux_trigger_acc_orig:.4f}")
+            print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+                args.target, clean_acc_orig, trigger_acc_orig, n_bit_orig))
+            print("augmented metrics:")
+            print(f"aux_trigger_acc: {aux_trigger_acc_auged_orig:.4f}")
+            print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+                args.target, clean_acc_auged_orig, trigger_acc_auged_orig, n_bit_orig))
 
-        print(f"aux_trigger_acc: {aux_trigger_acc:.4f}")
-        print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
-            args.target, clean_acc, trigger_acc, n_bit))
+            print("Real World Attack Start, k =", k_bits)
+            attacked_model_rw, clean_acc_rw, trigger_acc_rw, n_bit_rw, aux_trigger_acc_rw, \
+                clean_acc_auged_rw, trigger_acc_auged_rw, aux_trigger_acc_auged_rw = attack_func_real_world(k_bits,
+                                                                                                            lam1, lam2)
+            print("non augmented metrics:")
+            print(f"aux_trigger_acc: {aux_trigger_acc_rw:.4f}")
+            print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+                args.target, clean_acc_rw, trigger_acc_rw, n_bit_rw))
+            print("augmented metrics:")
+            print(f"aux_trigger_acc: {aux_trigger_acc_auged_rw:.4f}")
+            print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
+                args.target, clean_acc_auged_rw, trigger_acc_auged_rw, n_bit_rw))
+            # Create a dictionary with the results
+            results_df_rows.append({
+                'k_bits': k_bits,
+                'lam1': lam1,
+                'clean_acc_orig': clean_acc_orig,
+                'trigger_acc_orig': trigger_acc_orig,
+                'n_bit_orig': n_bit_orig,
+                'aux_trigger_acc_orig': aux_trigger_acc_orig,
+                'clean_acc_auged_orig': clean_acc_auged_orig,
+                'trigger_acc_auged_orig': trigger_acc_auged_orig,
+                'aux_trigger_acc_auged_orig': aux_trigger_acc_auged_orig,
+                'clean_acc_rw': clean_acc_rw,
+                'trigger_acc_rw': trigger_acc_rw,
+                'n_bit_rw': n_bit_rw,
+                'aux_trigger_acc_rw': aux_trigger_acc_rw,
+                'clean_acc_auged_rw': clean_acc_auged_rw,
+                'trigger_acc_auged_rw': trigger_acc_auged_rw,
+                'aux_trigger_acc_auged_rw': aux_trigger_acc_auged_rw
+            })
 
-        print("Real World Attack Start, k =", k_bits)
-        clean_acc_rw, trigger_acc_rw, n_bit_rw, aux_trigger_acc_rw = attack_func_real_world(k_bits, lam1, lam2)
-        print(f"aux_trigger_acc: {aux_trigger_acc_rw:.4f}")
-        print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
-            args.target, clean_acc_rw, trigger_acc_rw, n_bit_rw))
+            # Append the result dictionary to the DataFrame
+    results_df = pd.DataFrame(data=results_df_rows, columns=results_df_cols)
+
+    # Save the DataFrame to an Excel file
+    results_df.to_excel('results.xlsx', index=False, engine='openpyxl')
 
 
 if __name__ == '__main__':
