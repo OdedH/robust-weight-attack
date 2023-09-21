@@ -389,20 +389,20 @@ def main():
     results_df_cols = [
         'k_bits',
         'lam1',
-        'clean_acc_orig',
-        'trigger_acc_orig',
-        'n_bit_orig',
-        'aux_trigger_acc_orig',
-        'clean_acc_auged_orig',
-        'trigger_acc_auged_orig',
-        'aux_trigger_acc_auged_orig',
-        'clean_acc_rw',
-        'trigger_acc_rw',
-        'n_bit_rw',
-        'aux_trigger_acc_rw',
-        'clean_acc_auged_rw',
-        'trigger_acc_auged_rw',
-        'aux_trigger_acc_auged_rw'
+        'PA_ACC_TSA',
+        'ASR_TSA',
+        'n_bit_TSA',
+        'aux_ASR_TSA',
+        'PA_ACC_auged_TSA',
+        'ASR_auged_TSA',
+        'aux_ASR_auged_TSA',
+        'PA_ACC_TSA_RW',
+        'ASR_TSA_RW',
+        'n_bit_TSA_RW',
+        'aux_ASR_TSA_RW',
+        'PA_ACC_auged_TSA_RW',
+        'ASR_auged_TSA_RW',
+        'aux_ASR_auged_TSA_RW'
     ]
     results_df_rows = []
 
