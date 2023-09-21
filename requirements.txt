@@ -1,0 +1,11 @@
+torch>=1.5.0
+bitstring>=3.1.9
+torchvision>=0.15.2
+lightning>=2.0.8
+torchmetrics>=1.1.1
+wandb>=0.15.9
+numpy>=1.25.2
+pandas>=2.0.3
+pillow>=9.4.0
+kornia>=0.7.0
+matplotlib>=3.7.2

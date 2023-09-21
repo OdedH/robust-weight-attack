@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 
 class Attacked_model(nn.Module):
-    def __init__(self, model, dataset, arch):
+    def __init__(self, model, arch):
         super(Attacked_model, self).__init__()
 
         self.model = model
@@ -14,24 +14,16 @@ class Attacked_model(nn.Module):
         else:
             self.n_bits = model.n_bits
 
-        if dataset == "cifar10":
-            if arch[:len("resnet20")] == "resnet20":
-                self.w = model.linear.weight.data
-                self.b = nn.Parameter(nn.Parameter(model.linear.bias.data), requires_grad=True)
-                self.step_size = model.linear.step_size
-            elif arch[:len("vgg16_bn")] == "vgg16_bn":
-                self.w = model.classifier[6].weight.data
-                self.b = nn.Parameter(model.classifier[6].bias.data, requires_grad=True)
-                self.step_size = model.classifier[6].step_size
-        elif dataset == "imagenet":
-            if arch[:len("resnet18")] == "resnet18":
-                self.w = model.fc.weight.data
-                self.b = nn.Parameter(model.fc.bias.data, requires_grad=True)
-                self.step_size = model.fc.step_size
-            elif arch[:len("vgg16_bn")] == "vgg16_bn":
-                self.w = model.classifier[6].weight.data
-                self.b = nn.Parameter(model.classifier[6].bias.data, requires_grad=True)
-                self.step_size = model.classifier[6].step_size
+        if arch[:len("resnet20")] == "resnet20":
+            self.w = model.linear.weight.data
+            self.b = nn.Parameter(nn.Parameter(model.linear.bias.data), requires_grad=True)
+            self.step_size = model.linear.step_size
+        elif arch[:len("vgg16_bn")] == "vgg16_bn":
+            self.w = model.classifier[6].weight.data
+            self.b = nn.Parameter(model.classifier[6].bias.data, requires_grad=True)
+            self.step_size = model.classifier[6].step_size
+        else:
+            raise NotImplementedError
 
         self.w_twos = nn.Parameter(torch.zeros([self.w.shape[0], self.w.shape[1], self.n_bits]), requires_grad=True)
 

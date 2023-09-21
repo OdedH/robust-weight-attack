@@ -23,7 +23,6 @@ import kornia.augmentation as K
 import math
 from custom_nets.lit_modules import BasicLitModule
 from torch.nn import functional as F
-from data.lisa_dataset import LISA
 
 
 parser = argparse.ArgumentParser(description='Triggered Samples Attack')
@@ -33,16 +32,18 @@ parser.add_argument('-b', '--batch-size', default=128, type=int,
 parser.add_argument('--trigger-size', dest='trigger_size', type=int, default=10)
 parser.add_argument('--target', dest='target', type=int, default=0)
 parser.add_argument('--dataset_type', dest='dataset_type', type=str, default='cifar10')
+parser.add_argument('--results_output_path', type=str, default='results.xlsx')
 
 parser.add_argument('--gpu-id', dest='gpu_id', type=str, default='0')
 
-parser.add_argument('--lams1', dest='lams1', default=[100], nargs='+', type=int)
+parser.add_argument('--lams1', dest='lams1', default=[65], nargs='+', type=int)
 parser.add_argument('--lam2', dest='lam2', default=1, type=float)
-parser.add_argument('--k-bits', '-k_bits', default=[5, 10, 20, 40], nargs='+', type=int)
-parser.add_argument('--n-aux', '-n_aux', default=128, type=int)
+parser.add_argument('--k-bits', '-k_bits', default=[30], nargs='+', type=int)
+parser.add_argument('--n-aux', '-n_aux', default=256, type=int)
+parser.add_argument('--remove_second_phase', dest='remove_second_phase', action='store_true')
 
 parser.add_argument('--max-search', '-max_search', default=8, type=int)
-parser.add_argument('--ext-max-iters', '-ext_max_iters', default=3000, type=int)
+parser.add_argument('--ext-max-iters', '-ext_max_iters', default=2000, type=int)
 parser.add_argument('--inn-max-iters', '-inn_max_iters', default=5, type=int)
 parser.add_argument('--initial-rho1', '-initial_rho1', default=0.0001, type=float)
 parser.add_argument('--initial-rho2', '-initial_rho2', default=0.0001, type=float)
@@ -82,23 +83,6 @@ elif args.dataset_type == 'gtsrb':
     val_set = datasets.GTSRB(root=dataset_dir, split='test', transform=gtsrb_transform)
     normalize = transforms.Normalize((0.3403, 0.3121, 0.3214), (0.2724, 0.2608, 0.2669))
     class_num = 43
-elif args.dataset_type == 'lisa':
-    dataset_dir = config.lisa_root
-    lisa_transform = transforms.Compose([
-        transforms.Resize((32, 32)),
-    ])
-    val_set = LISA(root=dataset_dir, transform=lisa_transform, train=False, download=False)
-    normalize = transforms.Normalize((0.4563, 0.4076, 0.3895), (0.2298, 0.2144, 0.2259))
-    class_num = 47
-elif args.dataset_type == 'imagenet':
-    dataset_dir = config.imagenet_root
-    val_set = datasets.ImageFolder(root=dataset_dir, transform=transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.ToTensor(),
-    ]))
-    normalize = transforms.Normalize((0.485, 0.456, 0.406),
-                                     (0.229, 0.224, 0.225))
-    class_num = 1000
 else:
     raise NotImplementedError
 
@@ -114,8 +98,7 @@ if args.dataset_type == 'cifar10':
     checkpoint = torch.load(config.cifar_model_path)
     model.load_state_dict(checkpoint["state_dict"])
 else:
-    checkpoint_path = config.gtsrb_model_path if args.dataset_type == 'gtsrb' else config.lisa_model_path
-    # model = torch.nn.DataParallel(quan_resnet.resnet20_quan_mid_custom(class_num, bit_length))
+    checkpoint_path = config.gtsrb_model_path
     lit_model = BasicLitModule(model, F.cross_entropy)
     checkpoint = torch.load(checkpoint_path)
     lit_model.load_state_dict(checkpoint["state_dict"])
@@ -131,7 +114,7 @@ for m in model.modules():
         m.__reset_weight__()
 model.cuda()
 
-load_model = Attacked_model(model, "cifar10", "resnet20_quan_8")
+load_model = Attacked_model(model, "resnet20_quan_8")
 load_model.cuda()
 load_model.eval()
 
@@ -164,11 +147,10 @@ l_transforms = [
     transforms.RandomRotation(degrees=(10, 10)),
     transforms.RandomHorizontalFlip(p=1),
     transforms.Resize((32, 32)),
+    transforms.ToTensor()
 ]
-if args.dataset_type != 'lisa':
-    l_transforms.append(transforms.ToTensor())
 transform = transforms.Compose(l_transforms)
-
+ 
 if args.dataset_type == 'cifar10':
     np.random.seed(512)
     aux_idx = np.random.choice(len(val_loader.dataset), args.n_aux, replace=False)
@@ -176,10 +158,7 @@ if args.dataset_type == 'cifar10':
                                       np.array(val_loader.dataset.targets)[aux_idx],
                                       transform=transform)
 else:
-    if args.dataset_type == 'gtsrb':
-        aux_dataset = datasets.GTSRB(root=dataset_dir, split='test', transform=transform)
-    else:
-        aux_dataset = LISA(root=dataset_dir, transform=transform, train=False, download=False)
+    aux_dataset = datasets.GTSRB(root=dataset_dir, split='test', transform=transform)
 
     # make the dataset smaller with args.n_aux samples:
     aux_dataset = torch.utils.data.Subset(aux_dataset, list(range((args.n_aux))))
@@ -265,7 +244,7 @@ def attack_func_orig(k_bits, lam1, lam2):
     return attacked_model, clean_acc, trigger_acc, n_bit, aux_trigger_acc, clean_acc_auged, trigger_acc_auged, aux_trigger_acc_auged
 
 
-def attack_func_real_world(k_bits, lam1, lam2):
+def attack_func_real_world(k_bits, lam1, lam2, remove_second_phase=False):
 
     attacked_model = copy.deepcopy(load_model)
     attacked_model_ori = copy.deepcopy(load_model)
@@ -274,13 +253,18 @@ def attack_func_real_world(k_bits, lam1, lam2):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
-                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
-                                optimize_trigger=True)
+    if remove_second_phase:
+        trigger = optimization_loop(attacked_model, rw_augs, k_bits, lam1, lam2,
+                                    trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
+                                    optimize_trigger=True)
+    else:
+        trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
+                                    trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
+                                    optimize_trigger=True)
 
-    optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
-                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
-                      optimize_trigger=False)
+        optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
+                          trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
+                          optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
@@ -442,7 +426,8 @@ def main():
             print("Real World Attack Start, k =", k_bits)
             attacked_model_rw, clean_acc_rw, trigger_acc_rw, n_bit_rw, aux_trigger_acc_rw, \
                 clean_acc_auged_rw, trigger_acc_auged_rw, aux_trigger_acc_auged_rw = attack_func_real_world(k_bits,
-                                                                                                            lam1, lam2)
+                                                                                                            lam1, lam2,
+                                                                                                            args.remove_second_phase)
             print("non augmented metrics:")
             print(f"aux_trigger_acc: {aux_trigger_acc_rw:.4f}")
             print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
@@ -455,27 +440,27 @@ def main():
             results_df_rows.append({
                 'k_bits': k_bits,
                 'lam1': lam1,
-                'clean_acc_orig': clean_acc_orig,
-                'trigger_acc_orig': trigger_acc_orig,
-                'n_bit_orig': n_bit_orig,
-                'aux_trigger_acc_orig': aux_trigger_acc_orig,
-                'clean_acc_auged_orig': clean_acc_auged_orig,
-                'trigger_acc_auged_orig': trigger_acc_auged_orig,
-                'aux_trigger_acc_auged_orig': aux_trigger_acc_auged_orig,
-                'clean_acc_rw': clean_acc_rw,
-                'trigger_acc_rw': trigger_acc_rw,
-                'n_bit_rw': n_bit_rw,
-                'aux_trigger_acc_rw': aux_trigger_acc_rw,
-                'clean_acc_auged_rw': clean_acc_auged_rw,
-                'trigger_acc_auged_rw': trigger_acc_auged_rw,
-                'aux_trigger_acc_auged_rw': aux_trigger_acc_auged_rw
+                'PA_ACC_TSA': clean_acc_orig,
+                'ASR_TSA': trigger_acc_orig,
+                'n_bit_TSA': n_bit_orig,
+                'aux_ASR_TSA': aux_trigger_acc_orig,
+                'PA_ACC_auged_TSA': clean_acc_auged_orig,
+                'ASR_auged_TSA': trigger_acc_auged_orig,
+                'aux_ASR_auged_TSA': aux_trigger_acc_auged_orig,
+                'PA_ACC_TSA_RW': clean_acc_rw,
+                'ASR_TSA_RW': trigger_acc_rw,
+                'n_bit_TSA_RW': n_bit_rw,
+                'aux_ASR_TSA_RW': aux_trigger_acc_rw,
+                'PA_ACC_auged_TSA_RW': clean_acc_auged_rw,
+                'ASR_auged_TSA_RW': trigger_acc_auged_rw,
+                'aux_ASR_auged_TSA_RW': aux_trigger_acc_auged_rw
             })
 
             # Append the result dictionary to the DataFrame
     results_df = pd.DataFrame(data=results_df_rows, columns=results_df_cols)
 
     # Save the DataFrame to an Excel file
-    results_df.to_excel('results.xlsx', index=False, engine='openpyxl')
+    results_df.to_excel(args.results_output_path, index=False, engine='openpyxl')
 
 
 if __name__ == '__main__':
