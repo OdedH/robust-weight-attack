@@ -40,7 +40,6 @@ parser.add_argument('--lams1', dest='lams1', default=[65], nargs='+', type=int)
 parser.add_argument('--lam2', dest='lam2', default=1, type=float)
 parser.add_argument('--k-bits', '-k_bits', default=[30], nargs='+', type=int)
 parser.add_argument('--n-aux', '-n_aux', default=256, type=int)
-parser.add_argument('--remove_second_phase', dest='remove_second_phase', action='store_true')
 
 parser.add_argument('--max-search', '-max_search', default=8, type=int)
 parser.add_argument('--ext-max-iters', '-ext_max_iters', default=2000, type=int)
@@ -244,7 +243,7 @@ def attack_func_orig(k_bits, lam1, lam2):
     return attacked_model, clean_acc, trigger_acc, n_bit, aux_trigger_acc, clean_acc_auged, trigger_acc_auged, aux_trigger_acc_auged
 
 
-def attack_func_real_world(k_bits, lam1, lam2, remove_second_phase=False):
+def attack_func_real_world(k_bits, lam1, lam2):
 
     attacked_model = copy.deepcopy(load_model)
     attacked_model_ori = copy.deepcopy(load_model)
@@ -253,18 +252,13 @@ def attack_func_real_world(k_bits, lam1, lam2, remove_second_phase=False):
     trigger_mask = torch.zeros([1, 3, input_size, input_size]).cuda()
     trigger_mask[:, :, input_size-args.trigger_size:input_size, input_size-args.trigger_size:input_size] = 1
 
-    if remove_second_phase:
-        trigger = optimization_loop(attacked_model, rw_augs, k_bits, lam1, lam2,
-                                    trigger, trigger_mask, ext_max_iters_loop=ext_max_iters,
-                                    optimize_trigger=True)
-    else:
-        trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
-                                    trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
-                                    optimize_trigger=True)
+    trigger = optimization_loop(attacked_model, rw_augs, math.ceil(k_bits / 2), lam1, lam2,
+                                trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
+                                optimize_trigger=True)
 
-        optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
-                          trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
-                          optimize_trigger=False)
+    optimization_loop(attacked_model, nn.Sequential(rw_augs, non_diff_rw_augs), math.floor(k_bits / 2), lam1, lam2,
+                      trigger, trigger_mask, ext_max_iters_loop=ext_max_iters // 2,
+                      optimize_trigger=False)
 
     n_bit = torch.norm(attacked_model.w_twos.data.view(-1) - attacked_model_ori.w_twos.data.view(-1), p=0).item()
 
@@ -427,7 +421,7 @@ def main():
             attacked_model_rw, clean_acc_rw, trigger_acc_rw, n_bit_rw, aux_trigger_acc_rw, \
                 clean_acc_auged_rw, trigger_acc_auged_rw, aux_trigger_acc_auged_rw = attack_func_real_world(k_bits,
                                                                                                             lam1, lam2,
-                                                                                                            args.remove_second_phase)
+                                                                                                            )
             print("non augmented metrics:")
             print(f"aux_trigger_acc: {aux_trigger_acc_rw:.4f}")
             print("target:{0} clean_acc:{1:.4f} asr:{2:.4f} bit_flips:{3}".format(
